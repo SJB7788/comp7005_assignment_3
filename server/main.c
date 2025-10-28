@@ -1,3 +1,4 @@
+#include <poll.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -18,6 +19,7 @@ static in_port_t parse_port(const char *binary_name, const char *port_str);
 static void convert_address(const char *address, struct sockaddr_storage *addr);
 static int create_socket(int domain, int type, int protocol);
 static void bind_socket(int sockfd, struct sockaddr_storage *addr, in_port_t port);
+static struct pollfd* initialize_poll(int sockfd, struct sockaddr_storage **client_socket);
 static void start_listening(int server_fd, int backlog);
 static int accept_connection(int server_fd, struct sockaddr_storage *client_addr, socklen_t *client_addr_len);
 static void send_message(int client_sockfd, const struct sockaddr_storage *client_addr, const char *message);
@@ -45,6 +47,11 @@ int main(int argc, char *argv[])
     int sockfd;
     in_port_t port;
     struct sockaddr_storage addr;
+    
+    struct sockaddr_storage *client_socket;
+    struct pollfd *fd_set;
+    int client_count;
+
     ssize_t nread;
     char buffer[BUFFER_SIZE];
 
@@ -64,6 +71,7 @@ int main(int argc, char *argv[])
     }
 
     bind_socket(sockfd, &addr, port);
+    fd_set = initialize_poll(sockfd, &client_socket);
     start_listening(sockfd, BACKLOG);
     setup_signal_handler();
 
@@ -270,6 +278,24 @@ static void bind_socket(int sockfd, struct sockaddr_storage *addr, in_port_t por
     printf("Bound to socket: %s:%u\n", addr_str, port);
 }
 
+static struct pollfd* initialize_poll(int sockfd, struct sockaddr_storage **client_socket) {
+    struct pollfd *fd_set;
+
+    *client_socket = NULL;
+
+    fd_set = (struct pollfd*)malloc(sizeof(struct pollfd));
+
+    if (fd_set == NULL) {
+        perror("malloc");
+        exit(EXIT_FAILURE);
+    }
+
+    fd_set[0].fd = sockfd;
+    fd_set[0].events = POLLIN;
+    
+    return fd_set; 
+}
+
 static void start_listening(int server_fd, int backlog)
 {
     if (listen(server_fd, backlog) == -1)
@@ -285,8 +311,6 @@ static void start_listening(int server_fd, int backlog)
 static int accept_connection(int server_fd, struct sockaddr_storage *client_addr, socklen_t *client_addr_len)
 {
     int client_fd;
-    char client_host[NI_MAXHOST];
-    char client_service[NI_MAXSERV];
 
     errno = 0;
     client_fd = accept(server_fd, (struct sockaddr *)client_addr, client_addr_len);
@@ -299,15 +323,6 @@ static int accept_connection(int server_fd, struct sockaddr_storage *client_addr
         }
 
         return -1;
-    }
-
-    if (getnameinfo((struct sockaddr *)client_addr, *client_addr_len, client_host, NI_MAXHOST, client_service, NI_MAXSERV, 0) == 0)
-    {
-        printf("Accepted a new connection from %s:%s\n", client_host, client_service);
-    }
-    else
-    {
-        printf("Unable to get client information\n");
     }
 
     return client_fd;
