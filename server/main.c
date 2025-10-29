@@ -19,8 +19,9 @@ static in_port_t parse_port(const char *binary_name, const char *port_str);
 static void convert_address(const char *address, struct sockaddr_storage *addr);
 static int create_socket(int domain, int type, int protocol);
 static void bind_socket(int sockfd, struct sockaddr_storage *addr, in_port_t port);
-static struct pollfd* initialize_poll(int sockfd, struct sockaddr_storage **client_socket);
-static void handle_connection(int sockfd, struct pollfd **fd_set, struct sockaddr_storage **client_sockets, int *client_count);
+static struct pollfd *initialize_poll(int sockfd, int **client_socket, struct sockaddr_storage **client_sockets_addr);
+static void handle_connection(int sockfd, struct pollfd **fd_set, int **client_sockets, struct sockaddr_storage **client_sockets_addr, nfds_t *client_count);
+static void handle_client_data(int sockfd, struct pollfd **fd_set, int **client_sockets, struct sockaddr_storage **client_sockets_addr, nfds_t *client_count);
 static void start_listening(int server_fd, int backlog);
 static int accept_connection(int server_fd, struct sockaddr_storage *client_addr, socklen_t *client_addr_len);
 static void send_message(int client_sockfd, const struct sockaddr_storage *client_addr, const char *message);
@@ -48,10 +49,11 @@ int main(int argc, char *argv[])
     int sockfd;
     in_port_t port;
     struct sockaddr_storage addr;
-    
-    struct sockaddr_storage *client_socket;
+
+    int *client_socket;
+    struct sockaddr_storage *client_socket_addr;
     struct pollfd *fd_set;
-    int client_count;
+    nfds_t client_count = 0;
 
     ssize_t nread;
     char buffer[BUFFER_SIZE];
@@ -72,67 +74,37 @@ int main(int argc, char *argv[])
     }
 
     bind_socket(sockfd, &addr, port);
-    fd_set = initialize_poll(sockfd, &client_socket);
+    fd_set = initialize_poll(sockfd, &client_socket, &client_socket_addr);
     start_listening(sockfd, BACKLOG);
     setup_signal_handler();
-
+    int test = fd_set[0].revents;
+    printf("%d\n", test);
     while (!exit_flag)
     {
         int poll_val;
-        
+
         poll_val = poll(fd_set, client_count + 1, -1);
-        
-        if (poll_val < 0) {
+
+        if (poll_val < 0)
+        {
             perror("poll");
             exit(EXIT_FAILURE);
         }
 
-        handle_connection(sockfd, &fd_set, &client_socket, &client_count);
+        printf("before handle connection\n");
+        handle_connection(sockfd, &fd_set, &client_socket, &client_socket_addr, &client_count);
+        printf("client count: %ld\n", client_count);
 
-        int client_sockfd;
-        struct sockaddr_storage client_addr;
-        socklen_t client_addr_len;
-
-        client_addr_len = sizeof(client_addr);
-        client_sockfd = accept_connection(sockfd, &client_addr, &client_addr_len);
-
-        if (client_sockfd == -1)
+        if (client_socket != NULL)
         {
-            if (exit_flag)
-            {
-                break;
-            }
-
-            continue;
+            handle_client_data(sockfd, &fd_set, &client_socket, &client_socket_addr, &client_count);
         }
-
-        nread = read(client_sockfd, buffer, sizeof(buffer));
-
-        if (nread == -1)
-        {
-            perror("read");
-
-            close_socket(sockfd);
-            break;
-        }
-
-        buffer[nread] = '\0';
-
-        if (parse_client_message(buffer, &message, &key) == -1)
-        {
-            continue;
-        };
-
-        if (encrypt_vigenere_cipher(buffer, key, buffer, BUFFER_SIZE) == -1)
-        {
-            continue;
-        }
-
-        send_message(client_sockfd, &client_addr, buffer);
-        close_socket(client_sockfd);
     }
 
     close_socket(sockfd);
+    free(fd_set);
+    free(client_socket);
+    free(client_socket_addr);
 
     return EXIT_SUCCESS;
 }
@@ -290,58 +262,158 @@ static void bind_socket(int sockfd, struct sockaddr_storage *addr, in_port_t por
     printf("Bound to socket: %s:%u\n", addr_str, port);
 }
 
-static struct pollfd* initialize_poll(int sockfd, struct sockaddr_storage **client_socket) {
+static struct pollfd *initialize_poll(int sockfd, int **client_socket, struct sockaddr_storage **client_sockets_addr)
+{
     struct pollfd *fd_set;
 
     *client_socket = NULL;
+    *client_sockets_addr = (struct sockaddr_storage *)malloc(sizeof(struct sockaddr_storage));
 
-    fd_set = (struct pollfd*)malloc(sizeof(struct pollfd));
+    fd_set = (struct pollfd *)malloc(sizeof(struct pollfd));
 
-    if (fd_set == NULL) {
+    printf("after malloc\n");
+    if (fd_set == NULL)
+    {
         perror("malloc");
         exit(EXIT_FAILURE);
     }
 
     fd_set[0].fd = sockfd;
     fd_set[0].events = POLLIN;
-    
-    return fd_set; 
+
+    return fd_set;
 }
 
-static void handle_connection(int sockfd, struct pollfd **fd_set, struct sockaddr_storage **client_sockets, int *client_count) {
-    if (fd_set[0]->revents & POLLIN) {
+static void handle_connection(int sockfd, struct pollfd **fd_set, int **client_sockets, struct sockaddr_storage **client_sockets_addr, nfds_t *client_count)
+{
+    int test = fd_set[0]->revents;
+    printf("before if connection test: %d\n", test & POLLIN);
+
+    if (fd_set[0]->revents & POLLIN)
+    {
         int client_fd;
         struct sockaddr_storage client_addr;
         socklen_t client_addr_len;
-        struct sockaddr_storage *new_client_sockets;
+
+        int *new_client_sockets;
+        struct sockaddr_storage *new_client_sockets_addr;
         struct pollfd *new_fd_set;
 
+        printf("before connection\n");
         client_fd = accept_connection(sockfd, &client_addr, &client_addr_len);
+        printf("after connection\n");
 
-        if (client_fd == -1) {
+        if (client_fd == -1)
+        {
             perror("accept failed");
             return;
         }
 
-        *client_count++;
+        printf("before client count: %ld\n", *client_count);
+        (*client_count)++;
+        printf("before realloc, client count: %ld\n", *client_count);
 
-        new_client_sockets = (struct sockaddr_storage*)realloc(*client_sockets, sizeof(struct sockaddr_storage) * (*client_count));
-        new_fd_set = (struct pollfd*)realloc(*fd_set, sizeof(struct pollfd) * (*client_count));
+        printf("client socket\n");
+        new_client_sockets = (int *)realloc(*client_sockets, sizeof(int) * (*client_count));
+        printf("socket adddr\n");
+        new_client_sockets_addr = (struct sockaddr_storage *)realloc(*client_sockets_addr, sizeof(struct sockaddr_storage) * (*client_count));
+        printf("fd set\n");
 
-        if (new_client_sockets == NULL || new_fd_set == NULL) {
+        new_fd_set = (struct pollfd *)realloc(*fd_set, sizeof(struct pollfd) * (*client_count + 1));
+
+        printf("after realloc\n");
+        if (new_client_sockets == NULL || new_fd_set == NULL || new_client_sockets_addr == NULL)
+        {
             perror("realloc");
             free(*client_sockets);
+            free(*client_sockets_addr);
             free(*fd_set);
             exit(EXIT_FAILURE);
         }
 
         *client_sockets = new_client_sockets;
-        (*client_sockets)[(*client_count) - 1] = client_addr;
+        (*client_sockets)[(*client_count) - 1] = client_fd;
+
+        *client_sockets_addr = new_client_sockets_addr;
+        (*client_sockets_addr)[(*client_count) - 1] = client_addr;
 
         *fd_set = new_fd_set;
         (*fd_set)[*client_count].fd = client_fd;
         (*fd_set)[*client_count].events = POLLIN;
+
+        printf("Client Handled\n ");
     }
+    printf("AFTER if connection test: %d\n", test & POLLIN);
+}
+
+static void handle_client_data(int sockfd, struct pollfd **fd_set, int **client_sockets, struct sockaddr_storage **client_sockets_addr, nfds_t *client_count)
+{
+    printf("handling client data %ld\n", *client_count);
+    for (nfds_t i = 0; i < *client_count; i++)
+    {
+        printf("in loop\n");
+        printf("%d\n", *client_sockets[i]);
+        printf("%d\n", (*fd_set)[i + 1].fd);
+        printf("%d\n", (*fd_set)[i + 1].revents);
+        printf("%d\n", (*fd_set)[i + 1].revents & POLLIN);
+
+        if ((*client_sockets[i] != -1) && ((*fd_set)[i + 1].revents & POLLIN))
+        {
+            printf("found client data\n");
+
+            int client_fd;
+            char *key;
+            char buffer[BUFFER_SIZE];
+            char *message;
+            ssize_t nread;
+
+            client_fd = (*client_sockets)[i];
+
+            nread = read(client_fd, buffer, sizeof(buffer));
+
+            if (nread == -1)
+            {
+                perror("read");
+
+                close_socket(sockfd);
+                break;
+            }
+
+            buffer[nread] = '\0';
+
+            if (parse_client_message(buffer, &message, &key) == -1)
+            {
+                perror("Could not parse client message");
+                close_socket(client_fd);
+                continue;
+            }
+
+            if (encrypt_vigenere_cipher(buffer, key, buffer, BUFFER_SIZE) == -1)
+            {
+                perror("Could not encrypt message");
+                close_socket(client_fd);
+                continue;
+            }
+
+            printf("%s\n", buffer);
+
+            send_message(client_fd, (client_sockets_addr)[i], buffer);
+            close_socket(client_fd);
+
+            for (nfds_t j = i; i < *client_count - 1; j++)
+            {
+                (*client_sockets)[j] = (*client_sockets)[j + 1];
+                (*client_sockets_addr)[j] = (*client_sockets_addr)[j + 1];
+                (*fd_set)[j + 1] = (*fd_set)[j + 2];
+            }
+
+            (*client_count)--;
+            printf("count: %ld\n", *client_count);
+
+        }
+    }
+    printf("out of handling client data %ld\n", *client_count);
+
 }
 
 static void start_listening(int server_fd, int backlog)
