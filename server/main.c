@@ -20,6 +20,7 @@ static void convert_address(const char *address, struct sockaddr_storage *addr);
 static int create_socket(int domain, int type, int protocol);
 static void bind_socket(int sockfd, struct sockaddr_storage *addr, in_port_t port);
 static struct pollfd* initialize_poll(int sockfd, struct sockaddr_storage **client_socket);
+static void handle_connection(int sockfd, struct pollfd **fd_set, struct sockaddr_storage **client_sockets, int *client_count);
 static void start_listening(int server_fd, int backlog);
 static int accept_connection(int server_fd, struct sockaddr_storage *client_addr, socklen_t *client_addr_len);
 static void send_message(int client_sockfd, const struct sockaddr_storage *client_addr, const char *message);
@@ -77,6 +78,17 @@ int main(int argc, char *argv[])
 
     while (!exit_flag)
     {
+        int poll_val;
+        
+        poll_val = poll(fd_set, client_count + 1, -1);
+        
+        if (poll_val < 0) {
+            perror("poll");
+            exit(EXIT_FAILURE);
+        }
+
+        handle_connection(sockfd, &fd_set, &client_socket, &client_count);
+
         int client_sockfd;
         struct sockaddr_storage client_addr;
         socklen_t client_addr_len;
@@ -294,6 +306,42 @@ static struct pollfd* initialize_poll(int sockfd, struct sockaddr_storage **clie
     fd_set[0].events = POLLIN;
     
     return fd_set; 
+}
+
+static void handle_connection(int sockfd, struct pollfd **fd_set, struct sockaddr_storage **client_sockets, int *client_count) {
+    if (fd_set[0]->revents & POLLIN) {
+        int client_fd;
+        struct sockaddr_storage client_addr;
+        socklen_t client_addr_len;
+        struct sockaddr_storage *new_client_sockets;
+        struct pollfd *new_fd_set;
+
+        client_fd = accept_connection(sockfd, &client_addr, &client_addr_len);
+
+        if (client_fd == -1) {
+            perror("accept failed");
+            return;
+        }
+
+        *client_count++;
+
+        new_client_sockets = (struct sockaddr_storage*)realloc(*client_sockets, sizeof(struct sockaddr_storage) * (*client_count));
+        new_fd_set = (struct pollfd*)realloc(*fd_set, sizeof(struct pollfd) * (*client_count));
+
+        if (new_client_sockets == NULL || new_fd_set == NULL) {
+            perror("realloc");
+            free(*client_sockets);
+            free(*fd_set);
+            exit(EXIT_FAILURE);
+        }
+
+        *client_sockets = new_client_sockets;
+        (*client_sockets)[(*client_count) - 1] = client_addr;
+
+        *fd_set = new_fd_set;
+        (*fd_set)[*client_count].fd = client_fd;
+        (*fd_set)[*client_count].events = POLLIN;
+    }
 }
 
 static void start_listening(int server_fd, int backlog)
