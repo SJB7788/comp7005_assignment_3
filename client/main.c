@@ -4,6 +4,7 @@
 #include <netinet/in.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -24,6 +25,8 @@ static void close_socket(int client_fd);
 #define UNKNOWN_OPTION_MESSAGE_LEN 24
 #define BASE_TEN 10
 #define BUFFER_SIZE 256
+#define MAX_DELAY 5
+#define MIN_DELAY 1
 
 int main(int argc, char *argv[])
 {
@@ -38,7 +41,7 @@ int main(int argc, char *argv[])
     ssize_t nread;
     char buffer[BUFFER_SIZE];
     char msg_buffer[BUFFER_SIZE];
-
+    
     address = NULL;
     port_str = NULL;
     parse_arguments(argc, argv, &message, &key, &address, &port_str);
@@ -46,14 +49,19 @@ int main(int argc, char *argv[])
     port = parse_port(argv[0], port_str);
     sockfd = create_socket(addr.ss_family, SOCK_STREAM, 0);
     connect_socket(sockfd, &addr, port);
-    
+    srand(time(NULL));
+
     strcpy(msg_buffer, message);
     strcat(msg_buffer, " ");
     strcat(msg_buffer, key);
     strcat(msg_buffer, "\0");
-    
+
+    int delay = (rand() % (MAX_DELAY - MIN_DELAY + 1)) + MIN_DELAY;
+    printf("Simulating work for %d seconds on client\n", delay);
+    sleep(delay);
+
     send_message(sockfd, &addr, msg_buffer);
-    
+
     nread = read(sockfd, buffer, sizeof(buffer));
 
     if (nread == -1)
@@ -65,7 +73,6 @@ int main(int argc, char *argv[])
     printf("encrypted message: %s\n", buffer);
     decrypt_vigenere_cipher(buffer, key, buffer, BUFFER_SIZE);
     printf("decrypted message: %s\n", buffer);
-
 
     close_socket(sockfd);
 
@@ -213,6 +220,7 @@ static void connect_socket(int sockfd, struct sockaddr_storage *addr, in_port_t 
 
 static void send_message(int sockfd, const struct sockaddr_storage *addr, const char *message)
 {
+    printf("Sending server a message...\n");
     size_t len;
 
     len = strlen(message);
@@ -226,6 +234,8 @@ static void send_message(int sockfd, const struct sockaddr_storage *addr, const 
         perror("write");
         exit(EXIT_FAILURE);
     }
+
+    printf("Message Sent\n");
 }
 
 static char shift_char(char curr_char, int shift)

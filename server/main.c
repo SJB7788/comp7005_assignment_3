@@ -30,6 +30,8 @@ static int parse_client_message(char *input, char **message, char **key);
 static char shift_char(char curr_char, int shift);
 static int encrypt_vigenere_cipher(char *message, char *key, char buffer[], size_t buffer_size);
 _Noreturn static void usage(const char *program_name, int exit_code, const char *message);
+static void handle_cleanup_client(int client_fd, int index, nfds_t *client_count, struct pollfd **fd_set, int **client_sockets, struct sockaddr_storage **client_sockets_addr);
+static void handle_cleanup_server(int server_fd, struct pollfd *fd_set, int *client_socket, struct sockaddr_storage *client_socket_addr);
 static void setup_signal_handler(void);
 static void sigint_handler(int signum);
 
@@ -65,6 +67,7 @@ int main(int argc, char *argv[])
     convert_address(address, &addr);
     port = parse_port(argv[0], port_str);
     sockfd = create_socket(addr.ss_family, SOCK_STREAM, 0);
+    printf("server fd: %d\n", sockfd);
 
     int one = 1;
     if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) == -1)
@@ -75,10 +78,10 @@ int main(int argc, char *argv[])
 
     bind_socket(sockfd, &addr, port);
     fd_set = initialize_poll(sockfd, &client_socket, &client_socket_addr);
+
     start_listening(sockfd, BACKLOG);
     setup_signal_handler();
-    int test = fd_set[0].revents;
-    printf("%d\n", test);
+
     while (!exit_flag)
     {
         int poll_val;
@@ -88,12 +91,10 @@ int main(int argc, char *argv[])
         if (poll_val < 0)
         {
             perror("poll");
-            exit(EXIT_FAILURE);
+            break;
         }
 
-        printf("before handle connection\n");
         handle_connection(sockfd, &fd_set, &client_socket, &client_socket_addr, &client_count);
-        printf("client count: %ld\n", client_count);
 
         if (client_socket != NULL)
         {
@@ -101,11 +102,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    close_socket(sockfd);
-    free(fd_set);
-    free(client_socket);
-    free(client_socket_addr);
-
+    handle_cleanup_server(sockfd, fd_set, client_socket, client_socket_addr);
     return EXIT_SUCCESS;
 }
 
@@ -166,13 +163,6 @@ _Noreturn static void usage(const char *program_name, int exit_code, const char 
 
     fprintf(stderr, "Usage: %s <ip address> <port>\n", program_name);
     exit(exit_code);
-}
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-static void sigint_handler(int signum)
-{
-    exit_flag = 1;
 }
 
 #pragma GCC diagnostic pop
@@ -271,7 +261,6 @@ static struct pollfd *initialize_poll(int sockfd, int **client_socket, struct so
 
     fd_set = (struct pollfd *)malloc(sizeof(struct pollfd));
 
-    printf("after malloc\n");
     if (fd_set == NULL)
     {
         perror("malloc");
@@ -286,9 +275,6 @@ static struct pollfd *initialize_poll(int sockfd, int **client_socket, struct so
 
 static void handle_connection(int sockfd, struct pollfd **fd_set, int **client_sockets, struct sockaddr_storage **client_sockets_addr, nfds_t *client_count)
 {
-    int test = fd_set[0]->revents;
-    printf("before if connection test: %d\n", test & POLLIN);
-
     if (fd_set[0]->revents & POLLIN)
     {
         int client_fd;
@@ -299,29 +285,20 @@ static void handle_connection(int sockfd, struct pollfd **fd_set, int **client_s
         struct sockaddr_storage *new_client_sockets_addr;
         struct pollfd *new_fd_set;
 
-        printf("before connection\n");
         client_fd = accept_connection(sockfd, &client_addr, &client_addr_len);
-        printf("after connection\n");
-
         if (client_fd == -1)
         {
             perror("accept failed");
             return;
         }
 
-        printf("before client count: %ld\n", *client_count);
         (*client_count)++;
-        printf("before realloc, client count: %ld\n", *client_count);
 
-        printf("client socket\n");
+        // resize arrays
         new_client_sockets = (int *)realloc(*client_sockets, sizeof(int) * (*client_count));
-        printf("socket adddr\n");
         new_client_sockets_addr = (struct sockaddr_storage *)realloc(*client_sockets_addr, sizeof(struct sockaddr_storage) * (*client_count));
-        printf("fd set\n");
-
         new_fd_set = (struct pollfd *)realloc(*fd_set, sizeof(struct pollfd) * (*client_count + 1));
 
-        printf("after realloc\n");
         if (new_client_sockets == NULL || new_fd_set == NULL || new_client_sockets_addr == NULL)
         {
             perror("realloc");
@@ -330,6 +307,7 @@ static void handle_connection(int sockfd, struct pollfd **fd_set, int **client_s
             free(*fd_set);
             exit(EXIT_FAILURE);
         }
+        printf("Connecting Client\n");
 
         *client_sockets = new_client_sockets;
         (*client_sockets)[(*client_count) - 1] = client_fd;
@@ -340,36 +318,30 @@ static void handle_connection(int sockfd, struct pollfd **fd_set, int **client_s
         *fd_set = new_fd_set;
         (*fd_set)[*client_count].fd = client_fd;
         (*fd_set)[*client_count].events = POLLIN;
+        (*fd_set)[*client_count].revents = 0;
 
-        printf("Client Handled\n ");
+        printf("Connected Client %d\n\n", client_fd);
     }
-    printf("AFTER if connection test: %d\n", test & POLLIN);
 }
 
 static void handle_client_data(int sockfd, struct pollfd **fd_set, int **client_sockets, struct sockaddr_storage **client_sockets_addr, nfds_t *client_count)
 {
-    printf("handling client data %ld\n", *client_count);
     for (nfds_t i = 0; i < *client_count; i++)
     {
-        printf("in loop\n");
-        printf("%d\n", *client_sockets[i]);
-        printf("%d\n", (*fd_set)[i + 1].fd);
-        printf("%d\n", (*fd_set)[i + 1].revents);
-        printf("%d\n", (*fd_set)[i + 1].revents & POLLIN);
-
         if ((*client_sockets[i] != -1) && ((*fd_set)[i + 1].revents & POLLIN))
         {
-            printf("found client data\n");
-
             int client_fd;
+            struct sockaddr_storage *client_addr;
             char *key;
             char buffer[BUFFER_SIZE];
             char *message;
             ssize_t nread;
 
             client_fd = (*client_sockets)[i];
+            client_addr = (client_sockets_addr)[i];
 
             nread = read(client_fd, buffer, sizeof(buffer));
+            printf("Received message from client %d\n", client_fd);
 
             if (nread == -1)
             {
@@ -395,25 +367,12 @@ static void handle_client_data(int sockfd, struct pollfd **fd_set, int **client_
                 continue;
             }
 
-            printf("%s\n", buffer);
+            send_message(client_fd, client_addr, buffer);
+            printf("Message sent to client %d\n\n", client_fd);
 
-            send_message(client_fd, (client_sockets_addr)[i], buffer);
-            close_socket(client_fd);
-
-            for (nfds_t j = i; i < *client_count - 1; j++)
-            {
-                (*client_sockets)[j] = (*client_sockets)[j + 1];
-                (*client_sockets_addr)[j] = (*client_sockets_addr)[j + 1];
-                (*fd_set)[j + 1] = (*fd_set)[j + 2];
-            }
-
-            (*client_count)--;
-            printf("count: %ld\n", *client_count);
-
+            handle_cleanup_client(client_fd, i, client_count, fd_set, client_sockets, client_sockets_addr);
         }
     }
-    printf("out of handling client data %ld\n", *client_count);
-
 }
 
 static void start_listening(int server_fd, int backlog)
@@ -421,11 +380,11 @@ static void start_listening(int server_fd, int backlog)
     if (listen(server_fd, backlog) == -1)
     {
         perror("listen failed");
-        close(server_fd);
+        close_socket(server_fd);
         exit(EXIT_FAILURE);
     }
 
-    printf("Listening for incoming connections...\n");
+    printf("Listening for incoming connections...\n\n");
 }
 
 static int accept_connection(int server_fd, struct sockaddr_storage *client_addr, socklen_t *client_addr_len)
@@ -463,6 +422,25 @@ static int parse_client_message(char *input, char **message, char **key)
     *key = last_space + 1;
 
     return 1;
+}
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+static void send_message(int client_sockfd, const struct sockaddr_storage *client_addr, const char *message)
+{
+    size_t len;
+
+    len = strlen(message);
+
+    ssize_t nwritten;
+
+    nwritten = write(client_sockfd, message, len);
+
+    if (nwritten == -1)
+    {
+        perror("write");
+        exit(EXIT_FAILURE);
+    }
 }
 
 static char shift_char(char curr_char, int shift)
@@ -530,6 +508,47 @@ static int encrypt_vigenere_cipher(char *message, char *key, char buffer[], size
     return 1;
 }
 
+#pragma GCC diagnostic pop
+
+static void close_socket(int sockfd)
+{
+    if (close(sockfd) == -1)
+    {
+        perror("Error closing socket");
+        exit(EXIT_FAILURE);
+    }
+}
+
+static void handle_cleanup_client(int client_fd, int index, nfds_t *client_count, struct pollfd **fd_set, int **client_sockets, struct sockaddr_storage **client_sockets_addr)
+{
+    close_socket(client_fd);
+
+    for (nfds_t j = index; j < *client_count - 1; j++)
+    {
+        (*client_sockets)[j] = (*client_sockets)[j + 1];
+        (*client_sockets_addr)[j] = (*client_sockets_addr)[j + 1];
+        (*fd_set)[j + 1] = (*fd_set)[j + 2];
+    }
+
+    (*client_count)--;
+}
+
+static void handle_cleanup_server(int server_fd, struct pollfd *fd_set, int *client_socket, struct sockaddr_storage *client_socket_addr)
+{
+    printf("Cleaning server resources...\n");
+    close_socket(server_fd);
+    free(fd_set);
+    free(client_socket);
+    free(client_socket_addr);
+}
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+static void sigint_handler(int signum)
+{
+    exit_flag = 1;
+}
+
 static void setup_signal_handler(void)
 {
     struct sigaction sa;
@@ -551,36 +570,6 @@ static void setup_signal_handler(void)
     if (sigaction(SIGINT, &sa, NULL) == -1)
     {
         perror("sigaction");
-        exit(EXIT_FAILURE);
-    }
-}
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-static void send_message(int client_sockfd, const struct sockaddr_storage *client_addr, const char *message)
-{
-    size_t len;
-
-    len = strlen(message);
-
-    ssize_t nwritten;
-
-    nwritten = write(client_sockfd, message, len);
-
-    if (nwritten == -1)
-    {
-        perror("write");
-        exit(EXIT_FAILURE);
-    }
-}
-
-#pragma GCC diagnostic pop
-
-static void close_socket(int sockfd)
-{
-    if (close(sockfd) == -1)
-    {
-        perror("Error closing socket");
         exit(EXIT_FAILURE);
     }
 }
